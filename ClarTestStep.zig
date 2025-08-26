@@ -4,7 +4,7 @@
 
 step: Step,
 runner: *Step.Compile,
-args: std.ArrayListUnmanaged([]const u8),
+args: std.ArrayList([]const u8),
 
 const ClarTestStep = @This();
 
@@ -41,15 +41,15 @@ fn make(step: *Step, options: Step.MakeOptions) !void {
     var man = b.graph.cache.obtain();
     defer man.deinit();
 
-    var argv_list: std.ArrayList([]const u8) = .init(arena);
+    var argv_list: std.ArrayList([]const u8) = .empty;
     {
         const file_path = clar.runner.installed_path orelse clar.runner.generated_bin.?.path.?;
-        try argv_list.append(file_path);
+        try argv_list.append(arena, file_path);
         _ = try man.addFile(file_path, null);
     }
-    try argv_list.append("-t"); // force TAP output
+    try argv_list.append(arena, "-t"); // force TAP output
     for (clar.args.items) |arg| {
-        try argv_list.append(arg);
+        try argv_list.append(arena, arg);
         man.hash.addBytes(arg);
     }
 
@@ -74,26 +74,22 @@ fn make(step: *Step, options: Step.MakeOptions) !void {
         );
         defer poller.deinit();
 
-        const fifo = poller.fifo(.stdout);
-        const r = fifo.reader();
-
-        var buf: std.BoundedArray(u8, 1024) = .{};
-        const w = buf.writer();
+        const r: *std.io.Reader = poller.reader(.stdout);
+        var buf: [1024]u8 = undefined;
+        var w: std.io.Writer = .fixed(&buf);
 
         var parser: TapParser = .default;
         var node: ?std.Progress.Node = null;
         defer if (node) |n| n.end();
 
-        while (true) {
-            r.streamUntilDelimiter(w, '\n', null) catch |err| switch (err) {
-                error.EndOfStream => if (try poller.poll()) continue else break,
+        while (try poller.poll()) {
+            _ = r.streamDelimiter(&w, '\n') catch |err| switch (err) {
+                error.EndOfStream => continue,
                 else => return err,
             };
+            defer _ = w.consumeAll();
 
-            const line = buf.constSlice();
-            defer buf.resize(0) catch unreachable;
-
-            switch (try parser.parseLine(arena, line)) {
+            switch (try parser.parseLine(arena, w.buffered())) {
                 .start_suite => |suite| {
                     if (node) |n| n.end();
                     node = options.progress_node.start(suite, 0);
@@ -131,8 +127,8 @@ const TapParser = struct {
         feed_line,
 
         const Failure = struct {
-            description: std.ArrayListUnmanaged(u8),
-            reasons: std.ArrayListUnmanaged([]const u8),
+            description: std.ArrayList(u8),
+            reasons: std.ArrayList([]const u8),
         };
     };
 
